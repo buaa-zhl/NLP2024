@@ -1,129 +1,130 @@
-import os
-import random
-import re
-import jieba
-from sklearn.model_selection import train_test_split
 from sklearn.naive_bayes import MultinomialNB
-from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.decomposition import LatentDirichletAllocation
-from sklearn.preprocessing import LabelEncoder
-from sklearn.pipeline import make_pipeline
-from sklearn.model_selection import cross_val_score
+from sklearn.pipeline import Pipeline
+from sklearn.model_selection import cross_val_score, train_test_split
+from sklearn.feature_extraction.text import TfidfVectorizer
+from gensim import corpora, models
+from nltk.tokenize import word_tokenize
+import numpy as np
+import random
+import os
+import nltk
+import matplotlib.pyplot as plt
 
 
-# 获取当前脚本所在的文件夹路径
-current_directory = os.path.dirname(os.path.abspath(__file__))
+
+def extract_paragraphs(corpus_dir, num_paragraphs, max_tokens):
+    paragraphs = []
+    labels = []
+
+    # 遍历语料库中的每个txt文件
+    for novel_file in os.listdir(corpus_dir):
+        if novel_file.endswith('.txt'):
+            novel_path = os.path.join(corpus_dir, novel_file)
+
+            # 读取小说内容
+            with open(novel_path, 'r', encoding='ANSI', errors='ignore') as file:  # 使用gbk编码
+                novel_text = file.read()
+
+            # 根据换行符分割成段落
+            novel_paragraphs = novel_text.split('\n')
+
+            # 随机抽取一定数量的段落
+            random.shuffle(novel_paragraphs)
+            for paragraph in novel_paragraphs:
+                # 如果段落长度不超过max_tokens，则添加到数据集中
+                if len(paragraph.split()) <= max_tokens:
+                    paragraphs.append(paragraph)
+                    labels.append(novel_file[:-4])  # 小说文件名作为标签
+                    if len(paragraphs) == num_paragraphs:
+                        return paragraphs, labels
+    return paragraphs, labels
+
+# 语料库路径
+corpus_dir = r'./data'
+
+# 参数设置
+num_paragraphs = 1000
+max_tokens = [20, 100, 500, 1000, 3000]
+
+# 提取段落
+paragraphs_all = {}
+labels_all = {}
+for k in max_tokens:
+    paragraphs, labels = extract_paragraphs(corpus_dir, num_paragraphs, k)
+    paragraphs_all[k] = paragraphs
+    labels_all[k] = labels
+
+# 定义LDA模型
+def train_lda_model(paragraphs, num_topics, choose_tokenization):
+    # 创建字典和语料库
+    if choose_tokenization == 'word':
+        texts = [word_tokenize(paragraph) for paragraph in paragraphs]
+    elif choose_tokenization == 'char':
+        texts = [list(paragraph) for paragraph in paragraphs]
+    else:
+        raise ValueError("Invalid choose_tokenization parameter.")
+
+    dictionary = corpora.Dictionary(texts)
+    corpus = [dictionary.doc2bow(text) for text in texts]
+
+    # 训练LDA模型
+    lda_model = models.LdaModel(corpus, num_topics=num_topics, id2word=dictionary)
+
+    return lda_model
 
 
-# 加载停用词
-def load_stop_words(file_path):
-    with open(file_path, 'r', encoding='UTF-8') as file:
-        stop_words = set([line.strip() for line in file])
-    return stop_words
+
+# 使用朴素贝叶斯分类器
+classifier = MultinomialNB()
+
+# 使用Pipeline将向量化和分类器组合起来
+pipeline = Pipeline([
+    ('tfidf', TfidfVectorizer(max_features=1000)),
+    ('classifier', classifier)
+])
+
+# 参数设置
+num_topics_list = [10, 20,50,60,80,100]  # 主题数量列表
+max_tokens_list = [20, 100, 500, 1000, 3000]  # 最大 token 数量列表
+tokenization_list = ['word', 'char']  # 分词方式列表
 
 
-# 获取停用词列表
-stop_words_path = os.path.join(current_directory, '..', '停词.txt')
-stop_words = load_stop_words(stop_words_path)
+# 存储结果的字典
+results = {}
 
+# 训练和评估模型
+for num_topics in num_topics_list:
+    for max_tokens in max_tokens_list:
+        for tokenization in tokenization_list:
+            # 提取段落
+            paragraphs, labels = extract_paragraphs(corpus_dir, num_paragraphs, max_tokens)
 
-# 中文分词函数，包括停用词过滤和删除无意义符号
-def chinese_tokenizer(text):
-    text = re.sub(r'[^\w\s]', '', text)  # 删除标点符号
-    text = re.sub(r'\s+', ' ', text)  # 将一个或多个空白符号替换为单个空格
-    words = jieba.lcut(text)
-    return ' '.join(words).strip()  # 返回处理后的字符串，去除首尾空白
+            # 训练LDA模型
+            lda_model = train_lda_model(paragraphs, num_topics=num_topics, choose_tokenization=tokenization)
 
-# 读取文件并提取段落
-def extract_paragraphs(file_path, token_limit, sample_size):
-    all_paragraphs = []
-    for file_path in file_paths:
-        with open(file_path, 'r', encoding='ANSI', errors='ignore') as file:
-            text = file.read()
-        paragraphs = [para for para in text.split('\n') if len(para) >= 20]  # 确保段落长度至少为20
-        all_paragraphs.extend(paragraphs)
+            # 将段落表示为主题分布
+            topics_distribution = np.zeros((len(paragraphs), num_topics))
+            for i, paragraph in enumerate(paragraphs):
+                if tokenization == 'word':
+                    bow_vector = lda_model.id2word.doc2bow(word_tokenize(paragraph))
+                elif tokenization == 'char':
+                    bow_vector = lda_model.id2word.doc2bow(list(paragraph))
+                else:
+                    raise ValueError("Invalid choose_tokenization parameter.")
+                topics = lda_model[bow_vector]
+                for topic in topics:
+                    topics_distribution[i, topic[0]] = topic[1]
 
-    if len(all_paragraphs) < total_paragraphs_needed:
-        raise ValueError(f"所有文件中符合长度要求的段落数量不足 {total_paragraphs_needed}")
+            # 划分训练集和测试集
+            X_train, X_test, y_train, y_test = train_test_split(topics_distribution, labels, test_size=0.2,
+                                                                random_state=42)
 
-    selected_paragraphs = random.sample(all_paragraphs, total_paragraphs_needed)
-    return [' '.join(chinese_tokenizer(para)[:token_limit]) for para in selected_paragraphs]
+            # 使用10次交叉验证进行评估
+            cv_scores = cross_val_score(classifier, X_train, y_train, cv=10)
 
+            # 计算平均交叉验证分数
+            mean_cv_score = np.mean(cv_scores)
 
-# 计算每个文件的段落数量
-def calculate_paragraphs_count(file_paths):
-    word_counts = {}
-    total_word_count = 0
-    for file_path in file_paths:
-        with open(file_path, 'r', encoding='ANSI') as file:
-            text = file.read()
-            words = chinese_tokenizer(text)
-            word_counts[file_path] = len(words)
-            total_word_count += len(words)
+            # 输出结果
+            print(f"Num Topics: {num_topics}, Max Tokens: {max_tokens}, Tokenization: {tokenization}, Mean Cross-validation Score: {mean_cv_score:.4f}")
 
-    paragraphs_count = {}
-    for file_path, count in word_counts.items():
-        proportion = count / total_word_count
-        paragraphs_count[file_path] = round(proportion * total_paragraphs_needed)
-
-    return paragraphs_count
-
-
-# 加载数据集
-data = []
-labels = []
-file_paths = [os.path.join(current_directory, f) for f in os.listdir(current_directory) if f.endswith('.txt')]
-total_paragraphs_needed = 1000
-
-# 调用calculate_paragraphs_count函数并打印结果
-paragraphs_count = calculate_paragraphs_count(file_paths)
-for file_path, count in paragraphs_count.items():
-    print(f'{os.path.basename(file_path)}: {count}段落')
-
-# 循环不同的K值
-token_limits = [3000]  # K值确定为20
-accuracy_results = {}
-
-for token_limit in token_limits:
-    data.clear()
-    labels.clear()
-    for file_path in file_paths:
-        sample_size = paragraphs_count[file_path]  # 使用calculate_paragraphs_count函数的结果
-        paragraphs = extract_paragraphs(file_path, token_limit, sample_size)
-        data.extend(paragraphs)
-        labels.extend([os.path.basename(file_path)] * len(paragraphs))
-
-    # 文本向量化
-    vectorizer = CountVectorizer(
-        tokenizer=chinese_tokenizer,
-        max_df=0.9,  # 在超过90%的段落中出现的词汇将被忽略
-        min_df=10,  # 只考虑在至少10个段落中出现的词汇
-        max_features=1000  # 最多保留1000个最重要的词汇
-    )
-    X = vectorizer.fit_transform(data)
-
-    label_encoder = LabelEncoder()
-    y = label_encoder.fit_transform(labels)
-
-    # 应用LDA模型
-    topic_count = 50  # 主题数量T
-    lda = LatentDirichletAllocation(n_components=topic_count, random_state=0, max_iter=10)
-    X_topics = lda.fit_transform(X)
-
-    # 分类器选择
-    classifier = MultinomialNB()
-
-    # 创建管道
-    pipeline = make_pipeline(vectorizer, lda, classifier)
-
-    # 执行交叉验证
-    cv_scores = cross_val_score(pipeline, X, y, cv=10)
-    print("交叉验证分数:", cv_scores)
-    print("平均交叉验证准确率:", cv_scores.mean())
-
-    # 训练最终模型并测试准确性
-    X_train, X_test, y_train, y_test = train_test_split(X_topics, y, test_size=0.1, random_state=42)
-    classifier.fit(X_train, y_train)
-    y_pred = classifier.predict(X_test)
-    test_accuracy = accuracy_score(y_test, y_pred)
-    print("测试准确率:", test_accuracy)
